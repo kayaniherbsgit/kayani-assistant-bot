@@ -1,3 +1,4 @@
+// backend/server.js
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -9,39 +10,24 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// MongoDB connection
+// MongoDB
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 }).then(() => console.log('✅ MongoDB connected'))
   .catch(err => console.error('❌ Mongo Error:', err));
 
-// OpenAI
+// OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Function schema
-const qualificationFunction = {
-  name: "updateUserProfile",
-  description: "Extracts user qualification data from conversation",
-  parameters: {
-    type: "object",
-    properties: {
-      issue: { type: "string", description: "Tatizo la kiume kama kuwahi kumwaga, nk" },
-      age: { type: "string", description: "Umri wake na hali ya ndoa (mf. 24, hajaoa)" },
-      pastTreatment: { type: "string", description: "Ameshawahi kutumia tiba gani" },
-      readyToPay: { type: "string", description: "Je, yuko tayari kutumia pesa kidogo kwa tiba" }
-    }
-  }
-};
-
-// Webhook
+// Webhook route
 app.post('/webhook', async (req, res) => {
   const message = req.body.Body?.trim();
   const phone = req.body.From;
 
-  // Reset flow
+  // Reset
   if (message.toLowerCase().includes("reset") || message.toLowerCase().includes("anzisha upya")) {
     await User.deleteOne({ phone });
     return res.send(`<Response><Message>Tumeset kila kitu upya. Tuanzie mwanzo kabisa...\n\nSasa ndugu yangu. Tuongee wazi. Kuna tatizo kwenye tendo la ndoa? Unawahi kumwaga? Uume hausimami vizuri? Ama kuna lingine? Niambie kwa kifupi ili nikuelewe vizuri.</Message></Response>`);
@@ -62,54 +48,66 @@ app.post('/webhook', async (req, res) => {
 
   user.messages.push({ fromUser: true, text: message });
 
-  const systemPrompt = `
-You are Kayani Assistant, a warm Swahili-speaking consultant.
-You're chatting with a male client via WhatsApp to collect:
-1. Tatizo lake la kiume
-2. Umri na hali ya ndoa
-3. Kama alishawahi kutumia tiba
-4. Kama yuko tayari kutumia pesa kidogo kwa tiba bora
-
-Be friendly, natural, and keep it flowing.
-
-If all are collected, say they QUALIFY and include this link: 
-https://wa.me/255655889126?text=Nataka+kujiunga+na+program+ya+nguvu+za+kiume
-
-You will ALSO return the extracted data using the function tool below.
-`;
-
-  // Call GPT with function calling
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4-0613",
+  // Call GPT with function schema
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4-0613',
     messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: message }
+      {
+        role: 'system',
+        content: `
+You are Kayani Assistant, a respectful, warm Swahili-speaking advisor.
+You're collecting 4 things from the user in ANY order:
+1. issue (tatizo lake la nguvu za kiume)
+2. age (umri wake)
+3. pastTreatment (ameshawahi kutumia tiba?)
+4. readyToPay (yuko tayari kutumia pesa kidogo kwa tiba bora?)
+
+Respond in human Swahili, ask only what’s missing. When all 4 are ready, say the client QUALIFIED and give them this link:
+https://wa.me/255655889126?text=Nataka+kujiunga+na+program+ya+nguvu+za+kiume
+        `
+      },
+      {
+        role: 'user',
+        content: `User said: ${message}`
+      }
     ],
-    functions: [qualificationFunction],
-    function_call: "auto",
+    functions: [
+      {
+        name: "updateUserData",
+        description: "Extracts user profile info from their message",
+        parameters: {
+          type: "object",
+          properties: {
+            issue: { type: "string", description: "Tatizo lake la nguvu za kiume" },
+            age: { type: "string", description: "Umri wake" },
+            pastTreatment: { type: "string", description: "Dawa au tiba aliyowahi kutumia" },
+            readyToPay: { type: "string", description: "Kama yuko tayari kutumia pesa" }
+          }
+        }
+      }
+    ],
+    function_call: "auto"
   });
 
-  const reply = completion.choices[0];
+  const reply = response.choices[0].message.content;
+  const funcCall = response.choices[0].message.function_call;
 
-  // 🧠 If GPT called the function, update user profile
-  if (reply.finish_reason === "function_call") {
-    const funcArgs = JSON.parse(reply.message.function_call.arguments);
+  // Save bot reply
+  user.messages.push({ fromUser: false, text: reply });
 
-    if (funcArgs.issue) user.issue = funcArgs.issue;
-    if (funcArgs.age) user.age = funcArgs.age;
-    if (funcArgs.pastTreatment) user.pastTreatment = funcArgs.pastTreatment;
-    if (funcArgs.readyToPay) user.readyToPay = funcArgs.readyToPay;
+  // If GPT returned structured data, update the user profile
+  if (funcCall?.name === "updateUserData") {
+    const args = JSON.parse(funcCall.arguments);
+    if (args.issue && !user.issue) user.issue = args.issue;
+    if (args.age && !user.age) user.age = args.age;
+    if (args.pastTreatment && !user.pastTreatment) user.pastTreatment = args.pastTreatment;
+    if (args.readyToPay && !user.readyToPay) user.readyToPay = args.readyToPay;
   }
 
-  // Get natural reply text
-  const finalText = reply.message.content || "Asante kwa maelezo. Tuendelee...";
-
-  user.messages.push({ fromUser: false, text: finalText });
   await user.save();
-
-  return res.send(`<Response><Message>${finalText}</Message></Response>`);
+  res.send(`<Response><Message>${reply}</Message></Response>`);
 });
 
-// Port
+// Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Kayani Assistant with GPT Functions is LIVE on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 GPT-powered Kayani Assistant running on port ${PORT}`));
