@@ -27,6 +27,14 @@ app.post('/webhook', async (req, res) => {
   const message = req.body.Body?.trim();
   const phone = req.body.From;
 
+  // Handle "reset" or "anzisha upya"
+if (message.toLowerCase().includes("reset") || message.toLowerCase().includes("anzisha upya")) {
+  await User.deleteOne({ phone });
+  return res.send(`<Response><Message>Tumeset kila kitu upya. Tuanzie mwanzo kabisa...\n\nSasa ndugu yangu. Tuongee wazi. Kuna tatizo kwenye tendo la ndoa? Unawahi kumwaga? Uume hausimami vizuri? Ama kuna lingine? Niambie kwa kifupi ili nikuelewe vizuri.</Message></Response>`);
+}
+
+
+
   let user = await User.findOne({ phone });
   if (!user) user = new User({ phone });
 
