@@ -10,7 +10,7 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Connect to MongoDB
+// MongoDB
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -22,107 +22,77 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Webhook route for WhatsApp
+// Webhook
 app.post('/webhook', async (req, res) => {
   const message = req.body.Body?.trim();
   const phone = req.body.From;
 
-  // Handle "reset" or "anzisha upya"
-if (message.toLowerCase().includes("reset") || message.toLowerCase().includes("anzisha upya")) {
-  await User.deleteOne({ phone });
-  return res.send(`<Response><Message>Tumeset kila kitu upya. Tuanzie mwanzo kabisa...\n\nSasa ndugu yangu. Tuongee wazi. Kuna tatizo kwenye tendo la ndoa? Unawahi kumwaga? Uume hausimami vizuri? Ama kuna lingine? Niambie kwa kifupi ili nikuelewe vizuri.</Message></Response>`);
-}
-
-
-
   let user = await User.findOne({ phone });
-  if (!user) user = new User({ phone });
+  if (!user) {
+    user = new User({
+      phone,
+      issue: "",
+      age: "",
+      pastTreatment: "",
+      readyToPay: "",
+      messages: []
+    });
+  }
 
-  // Save message history
+  // Reset command
+  if (message.toLowerCase().includes("reset") || message.toLowerCase().includes("anzisha upya")) {
+    await User.deleteOne({ phone });
+    return res.send(`<Response><Message>Tumeset kila kitu upya. Tuanzie mwanzo kabisa...\n\nSasa ndugu yangu. Tuongee wazi. Kuna tatizo kwenye tendo la ndoa? Unawahi kumwaga? Uume hausimami vizuri? Ama kuna lingine? Niambie kwa kifupi ili nikuelewe vizuri.</Message></Response>`);
+  }
+
+  // Save latest message
   user.messages.push({ fromUser: true, text: message });
 
-  // Confusion handler (if user replies with "sijakuelewa", "una maanisha?", etc.)
-  const confusionWords = ['sijakuelewa', 'una maanisha', 'nimechanganyikiwa', 'haieleweki'];
-  const isConfused = confusionWords.some(word => message.toLowerCase().includes(word));
+  // 🧠 GPT Prompt
+  const systemPrompt = `
+You are Kayani Assistant, a warm, respectful, Swahili-speaking health consultant for men. 
+You're having a WhatsApp conversation with a client about their sexual health challenge. 
+Your job is to gently collect these 4 pieces of info (in any order):
 
-  if (isConfused) {
-    const lastAsked = getNextQuestion(user);
-    return res.send(`<Response><Message>${explain(lastAsked)}</Message></Response>`);
-  }
+1. Tatizo lake (e.g. kuwahi kumwaga, uume kushindwa kusimama, nk)
+2. Umri wake na hali ya ndoa
+3. Kama alishawahi kutumia tiba/dawa
+4. Kama yuko tayari kutumia pesa kidogo kwa tiba ya uhakika
 
-  // Track progress
-  if (!user.issue) user.issue = message;
-  else if (!user.age && /\d+/.test(message)) user.age = message;
-  else if (!user.pastTreatment) user.pastTreatment = message;
-  else if (!user.readyToPay) user.readyToPay = message;
+Here's what you already know about the client:
+- Tatizo: ${user.issue || "haijajulikana"}
+- Umri na ndoa: ${user.age || "haijajulikana"}
+- Tiba aliyowahi kutumia: ${user.pastTreatment || "haijajulikana"}
+- Utayari kutumia pesa: ${user.readyToPay || "haijajulikana"}
 
-  await user.save();
+Client just said:
+"${message}"
 
-  // If fully qualified, send GPT-4 message
-  if (user.issue && user.age && user.pastTreatment && user.readyToPay) {
-    const prompt = `
-You are a helpful, warm, Swahili-speaking assistant named Kayani Assistant.
-Use human-like language — casual, caring, and not too professional.
-Avoid robotic phrases. Sound like a real person talking one-on-one.
-User said:
-- Tatizo: ${user.issue}
-- Umri na ndoa: ${user.age}
-- Ameshawahi tumia tiba: ${user.pastTreatment}
-- Yuko tayari kutumia hela: ${user.readyToPay}
+Your job is to:
+- Understand what info this message contains
+- Update the missing fields (mentally)
+- Ask the next missing question
+- If all 4 are collected, congratulate the client and say they've QUALIFIED
+- Send this link at the end: https://wa.me/255655889126?text=Nataka+kujiunga+na+program+ya+nguvu+za+kiume
 
-Based on that, if the answers show readiness, respond joyfully, like:
-
-✅ "Asante ndugu yangu. Kwa maelezo haya, umequalify kujiunga na tiba yetu ya siku 7..."
-👉 Toa kiungo hiki pia mwisho wa meseji: https://wa.me/255655889126?text=Nataka+kujiunga+na+program+ya+nguvu+za+kiume
+Talk like a real human, use natural Swahili, avoid sounding like a robot. Be warm and clear.
 `;
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4',
-      messages: [{ role: 'user', content: prompt }],
-    });
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4',
+    messages: [{ role: 'system', content: systemPrompt }],
+  });
 
-    const reply = completion.choices[0].message.content;
-    user.messages.push({ fromUser: false, text: reply });
-    await user.save();
-    return res.send(`<Response><Message>${reply}</Message></Response>`);
-  }
+  const reply = completion.choices[0].message.content;
 
-  // Otherwise, ask next question
-  const next = getNextQuestion(user);
-  res.send(`<Response><Message>${next}</Message></Response>`);
+  // Save bot reply to history
+  user.messages.push({ fromUser: false, text: reply });
+
+  // OPTIONAL: Store guessed values later if you want full AI memory (or use OpenAI functions)
+  await user.save();
+
+  return res.send(`<Response><Message>${reply}</Message></Response>`);
 });
 
-// Human-style flow questions
-function getNextQuestion(user) {
-  if (!user.issue) {
-    return "Sasa ndugu yangu. Tuongee wazi. Kuna tatizo kwenye tendo la ndoa? Unawahi kumwaga? Uume hausimami vizuri? Ama kuna lingine? Niambie kwa kifupi ili nikuelewe vizuri.";
-  }
-  if (!user.age) {
-    return "Umri wako ukoje kaka? Na hali yako ya maisha — umeoa, una mchumba au bado upo solo?";
-  }
-  if (!user.pastTreatment) {
-    return "Na kabla hujanifikia, umeshawahi kujaribu dawa yoyote? Ya hospitali au hata za kienyeji?";
-  }
-  if (!user.readyToPay) {
-    return "Na je, uko tayari kuwekeza kiasi kidogo kwa tiba yenye uhakika? Si hela kubwa, lakini ni tiba iliyopangwa kitaalamu.";
-  }
-  return "Asante kwa maelezo. Naitengeneza tiba yako sasa hivi...";
-}
-
-// Handle confused users
-function explain(originalQuestion) {
-  if (originalQuestion.includes("Umri wako")) {
-    return "Namaanisha: una miaka mingapi? Na hali yako ya maisha — umeoa au bado hujafunga ndoa?";
-  }
-  if (originalQuestion.includes("kujaribu dawa yoyote")) {
-    return "Yaani, umeshawahi kutumia dawa yoyote kuhusu tatizo lako — iwe ya hospitali au ya kienyeji?";
-  }
-  if (originalQuestion.includes("uwekeza kiasi kidogo")) {
-    return "Namaanisha: je, uko tayari kutumia pesa kidogo kupata tiba ya kweli na ya uhakika?";
-  }
-  return "Samahani kaka. Hebu jaribu kuelezea tena kwa maneno yako ili nikuelewe vizuri.";
-}
-
-// Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Kayani Assistant (human version) running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Kayani Assistant GPT-powered brain live on port ${PORT}`));
