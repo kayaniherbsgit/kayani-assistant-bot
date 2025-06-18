@@ -10,7 +10,7 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// MongoDB
+// Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -22,15 +22,27 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// WhatsApp Webhook Endpoint
+// Webhook route for WhatsApp
 app.post('/webhook', async (req, res) => {
-  const message = req.body.Body;
+  const message = req.body.Body?.trim();
   const phone = req.body.From;
 
   let user = await User.findOne({ phone });
   if (!user) user = new User({ phone });
 
-  // Store answers
+  // Save message history
+  user.messages.push({ fromUser: true, text: message });
+
+  // Confusion handler (if user replies with "sijakuelewa", "una maanisha?", etc.)
+  const confusionWords = ['sijakuelewa', 'una maanisha', 'nimechanganyikiwa', 'haieleweki'];
+  const isConfused = confusionWords.some(word => message.toLowerCase().includes(word));
+
+  if (isConfused) {
+    const lastAsked = getNextQuestion(user);
+    return res.send(`<Response><Message>${explain(lastAsked)}</Message></Response>`);
+  }
+
+  // Track progress
   if (!user.issue) user.issue = message;
   else if (!user.age && /\d+/.test(message)) user.age = message;
   else if (!user.pastTreatment) user.pastTreatment = message;
@@ -38,16 +50,22 @@ app.post('/webhook', async (req, res) => {
 
   await user.save();
 
-  // Check if all questions are answered
+  // If fully qualified, send GPT-4 message
   if (user.issue && user.age && user.pastTreatment && user.readyToPay) {
     const prompt = `
-A user has shared the following:
-Issue: ${user.issue}
-Age: ${user.age}
-Past treatment: ${user.pastTreatment}
-Willing to pay: ${user.readyToPay}
+You are a helpful, warm, Swahili-speaking assistant named Kayani Assistant.
+Use human-like language — casual, caring, and not too professional.
+Avoid robotic phrases. Sound like a real person talking one-on-one.
+User said:
+- Tatizo: ${user.issue}
+- Umri na ndoa: ${user.age}
+- Ameshawahi tumia tiba: ${user.pastTreatment}
+- Yuko tayari kutumia hela: ${user.readyToPay}
 
-Reply in Swahili. If all answers indicate a qualifying client, respond joyfully and share this link: https://wa.me/255655889126?text=Nataka+kujiunga+na+program+ya+nguvu+za+kiume
+Based on that, if the answers show readiness, respond joyfully, like:
+
+✅ "Asante ndugu yangu. Kwa maelezo haya, umequalify kujiunga na tiba yetu ya siku 7..."
+👉 Toa kiungo hiki pia mwisho wa meseji: https://wa.me/255655889126?text=Nataka+kujiunga+na+program+ya+nguvu+za+kiume
 `;
 
     const completion = await openai.chat.completions.create({
@@ -56,21 +74,47 @@ Reply in Swahili. If all answers indicate a qualifying client, respond joyfully 
     });
 
     const reply = completion.choices[0].message.content;
+    user.messages.push({ fromUser: false, text: reply });
+    await user.save();
     return res.send(`<Response><Message>${reply}</Message></Response>`);
   }
 
-  // Ask next question
+  // Otherwise, ask next question
   const next = getNextQuestion(user);
   res.send(`<Response><Message>${next}</Message></Response>`);
 });
 
+// Human-style flow questions
 function getNextQuestion(user) {
-  if (!user.issue) return "Karibu Kayani Assistant. Unasumbuliwa na nini hasa kwenye tendo la ndoa?";
-  if (!user.age) return "Asante. Tafadhali taja umri wako na hali yako ya ndoa.";
-  if (!user.pastTreatment) return "Ulishawahi kutumia dawa yoyote kabla?";
-  if (!user.readyToPay) return "Je, uko tayari kutumia pesa kidogo kwa tiba bora?";
-  return "Tunaendelea kukutathmini...";
+  if (!user.issue) {
+    return "Sasa ndugu yangu. Tuongee wazi. Kuna tatizo kwenye tendo la ndoa? Unawahi kumwaga? Uume hausimami vizuri? Ama kuna lingine? Niambie kwa kifupi ili nikuelewe vizuri.";
+  }
+  if (!user.age) {
+    return "Umri wako ukoje kaka? Na hali yako ya maisha — umeoa, una mchumba au bado upo solo?";
+  }
+  if (!user.pastTreatment) {
+    return "Na kabla hujanifikia, umeshawahi kujaribu dawa yoyote? Ya hospitali au hata za kienyeji?";
+  }
+  if (!user.readyToPay) {
+    return "Na je, uko tayari kuwekeza kiasi kidogo kwa tiba yenye uhakika? Si hela kubwa, lakini ni tiba iliyopangwa kitaalamu.";
+  }
+  return "Asante kwa maelezo. Naitengeneza tiba yako sasa hivi...";
 }
 
+// Handle confused users
+function explain(originalQuestion) {
+  if (originalQuestion.includes("Umri wako")) {
+    return "Namaanisha: una miaka mingapi? Na hali yako ya maisha — umeoa au bado hujafunga ndoa?";
+  }
+  if (originalQuestion.includes("kujaribu dawa yoyote")) {
+    return "Yaani, umeshawahi kutumia dawa yoyote kuhusu tatizo lako — iwe ya hospitali au ya kienyeji?";
+  }
+  if (originalQuestion.includes("uwekeza kiasi kidogo")) {
+    return "Namaanisha: je, uko tayari kutumia pesa kidogo kupata tiba ya kweli na ya uhakika?";
+  }
+  return "Samahani kaka. Hebu jaribu kuelezea tena kwa maneno yako ili nikuelewe vizuri.";
+}
+
+// Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Kayani Assistant is running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Kayani Assistant (human version) running on port ${PORT}`));
